@@ -16,6 +16,7 @@ from .helpers import current_solution_filepath_or_project_rootpath
 from .urllib3 import PoolManager
 
 IS_EXTERNAL_SERVER_ENABLE = False
+IS_HTTP_LOG_ENABLE = True
 
 launcher_procs = {
 }
@@ -34,23 +35,25 @@ class WorkerThread(threading.Thread):
         self.data = data
         self.callback = callback
         self.timeout = timeout
-        settings = sublime.load_settings('OmniSharpSublime.sublime-settings')
+        # settings = sublime.load_settings('OmniSharpSublime.sublime-settings')
 
     def run(self):
         try:
-            print('======== request ======== \n Url: %s \n Data: %s' % (self.url, self.data))
+            if IS_HTTP_LOG_ENABLE:
+                print('======== request ======== \n Url: %s \n Data: %s' % (self.url, self.data))
 
             response = pool.urlopen('POST', self.url, body=self.data, timeout=self.timeout).data
-            
-            if not response:
-                print('======== response ======== \n response is empty')
-                self.callback(None)
-            else:
-                decodeddata = response.decode('utf-8')
-                print('======== response ======== \n %s' % decodeddata)
-                self.callback(json.loads(decodeddata))
-                
-            print('======== end ========')
+            cb_data = None
+            msg = 'response is empty'
+
+            if response:
+                msg = response.decode('utf-8')
+                cb_data = json.loads(msg)
+
+            if IS_HTTP_LOG_ENABLE:
+                print('======== response ======== \n %s' % msg)
+            self.callback(cb_data)
+
         except Exception as ex:
             if "checkalivestatus" not in self.url:
                 print(str(ex))
@@ -58,12 +61,17 @@ class WorkerThread(threading.Thread):
             else:
                 set_omnisharp_status("Server Not Running")
             self.callback(None)
+            
+        finally:
+            if IS_HTTP_LOG_ENABLE:
+                print('======== end ========')
 
 
 def get_response(view, endpoint, callback, params=None, timeout=None):
     solution_path =  current_solution_filepath_or_project_rootpath(view)
 
-    print('solution path: %s' % solution_path)
+    if IS_HTTP_LOG_ENABLE:
+        print('solution path: %s' % solution_path)
     if solution_path is None or solution_path not in server_ports:
         callback(None)
         return
@@ -109,13 +117,12 @@ def create_omnisharp_server_subprocess(view):
         print("already_bound_solution:%s" % solution_path)
         return
 
-    print("solution_path:%s" % solution_path)
-
     omni_port = _available_port()
-    print('omni_port:%s' % omni_port)
+    launcher_procs[solution_path] = True
+    server_ports[solution_path] = omni_port
+
     
-    
-    config_file = get_settings(view, "omnisharp_server_config_location")
+    # config_file = get_settings(view, "omnisharp_server_config_location")
 
     if IS_EXTERNAL_SERVER_ENABLE:
         launcher_proc = None
@@ -129,17 +136,17 @@ def create_omnisharp_server_subprocess(view):
                 omni_exe_path, 
                 '-s', quote_path(solution_path),
                 '-p', str(omni_port),
-                '-config', quote_path(config_file),
+                # '-config', quote_path(config_file),
                 '--hostPID', str(os.getpid())
             ]
 
             cmd = ' '.join(args)
             print(cmd)
             
-            view.window().run_command("exec",{"cmd":cmd,"shell":"true","quiet":"true"})
-            view.window().run_command("hide_panel", {"panel": "output.exec"})
-
             set_omnisharp_status("Loading Project")
+            view.window().run_command("exec",{"cmd":cmd,"shell":True,"quiet":True})
+            view.window().run_command("hide_panel", {"panel": "output.exec"})
+            
             sublime.set_timeout(lambda:check_solution_ready_status(view), 5000)
 
         except Exception as e:
@@ -147,8 +154,8 @@ def create_omnisharp_server_subprocess(view):
             set_omnisharp_status("Error Launching Server")
             return
 
-    launcher_procs[solution_path] = True
-    server_ports[solution_path] = omni_port
+    print("solution_path:%s" % solution_path)
+    print('omni_port:%s' % omni_port)
 
 def find_omni_exe_paths():
     if os.name == 'posix':
@@ -164,6 +171,7 @@ def find_omni_exe_paths():
 
     omni_exe_candidate_rel_paths = [
         'omnisharp-roslyn/artifacts/build/omnisharp/' + script_name,
+        'omnisharp-roslyn/scripts/' + script_name,
         'PrebuiltOmniSharpServer/' + script_name,
     ]
 
@@ -184,9 +192,10 @@ def check_solution_ready_status(view):
 
 def ready_status_handler(data):
     global readycount
-    if data == False:
+    if data is None or data == False:
         readycount += 1
         if readycount < 5:
+            set_omnisharp_status("Loading Project")
             sublime.set_timeout(lambda:check_solution_ready_status(sublime.active_window().active_view()), 5000)
         else:
             set_omnisharp_status("Error Loading Project")
@@ -200,7 +209,7 @@ def check_server_alive_status(view):
     get_response(view, "/checkalivestatus", alive_status_handler)    
 
 def alive_status_handler(data):
-    if data == False:
+    if data is None or data == False:
         # I don't expect this to get hit because if its not running it wil throw exception
         set_omnisharp_status("Server Not Running")
     elif data == True:
